@@ -60,47 +60,45 @@ wss.on('connection', (ws) => {
             const replyText = completion.choices[0].message.content;
 
             // Send text to UI
-            ws.send(JSON.stringify({ type: 'text', content: replyText }));
+            // 🔊 UPDATED AUDIO STREAM SECTION
+ws.send(JSON.stringify({ type: "audio_start" }));
+console.log("Deepgram: Requesting audio for:", replyText);
 
-            // 3. Generate Audio Stream (ALEXA STYLE: Linear16 Raw PCM)
-            ws.send(JSON.stringify({ type: "audio_start" }));
-
-            const dgResponse = await deepgram.speak.request(
-                { text: replyText },
-                { 
-                    model: "aura-asteria-en", 
-                    encoding: "linear16", // Raw PCM is best for mobile streaming
-                    container: "none",     // No headers = no delay
-                    sample_rate: 24000     // Matches the Frontend AudioContext
-                }
-            );
-
-            const stream = await dgResponse.getStream();
-            const reader = stream.getReader();
-
-            while (true) {
-                // Check if this specific stream has been aborted by a newer user input
-                if (currentAbortController.signal.aborted) {
-                    console.log("Stream aborted - user interrupted.");
-                    break;
-                }
-
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                // Send raw binary chunks immediately
-                ws.send(value);
-            }
-
-            ws.send(JSON.stringify({ type: "audio_end" }));
-
-        } catch (err) {
-            if (err.name === 'AbortError') {
-                console.log("Request was cancelled by a new user input.");
-            } else {
-                console.log("ERROR:", err.message);
-            }
+try {
+    const response = await deepgram.speak.request(
+        { text: replyText },
+        { 
+            model: "aura-asteria-en", 
+            encoding: "linear16", 
+            container: "none", 
+            sample_rate: 24000 
         }
+    );
+
+    const stream = await response.getStream();
+    const reader = stream.getReader();
+
+    let chunkCount = 0;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+            console.log(`Deepgram: Stream finished. Sent ${chunkCount} chunks.`);
+            break;
+        }
+
+        // Check if value actually has data
+        if (value && value.byteLength > 0) {
+            ws.send(value); // Send binary to frontend
+            chunkCount++;
+        }
+    }
+
+    ws.send(JSON.stringify({ type: "audio_end" }));
+
+} catch (dgError) {
+    console.error("Deepgram Error:", dgError.message);
+    ws.send(JSON.stringify({ type: "error", message: "Audio generation failed" }));
+}
     });
 
     ws.on('close', () => {
