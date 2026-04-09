@@ -67,7 +67,13 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'text', content: replyText }));
 
             // 5. GENERATE HUMAN-LIKE AUDIO
-            const response = await deepgram.speak.request(
+           
+
+           // 5. STREAM AUDIO (FINAL VERSION)
+
+ws.send(JSON.stringify({ type: "audio_start" }));
+
+const response = await deepgram.speak.request(
     { text: replyText },
     { 
         model: "aura-asteria-en",
@@ -77,19 +83,20 @@ wss.on('connection', (ws) => {
     }
 );
 
-            const stream = await response.getStream();
-            const reader = stream.getReader();
-            let chunks = [];
-            while (true) {
+const stream = await response.getStream();
+const reader = stream.getReader();
+
+while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
-    // Send each chunk immediately
-    ws.send(value);
+    ws.send(value); // 🔥 real-time chunks
 }
+
+ws.send(JSON.stringify({ type: "audio_end" }));
+      
             
             // Send audio buffer to browser
-            ws.send(Buffer.concat(chunks));
 
             // 6. SAVE MEMORY (Async - won't block the audio)
             axios.post(WP_AJAX_URL, new URLSearchParams({
