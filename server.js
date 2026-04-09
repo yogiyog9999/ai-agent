@@ -10,41 +10,50 @@ const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
 wss.on('connection', (ws) => {
     console.log('Caller connected');
+ws.on('message', async (message) => {
+    try {
+        const data = JSON.parse(message);
+        const userText = data.text;
 
-    ws.on('message', async (message) => {
-        try {
-            const data = JSON.parse(message);
-            const userText = data.text;
+        // 1. Get Text from OpenAI
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "You are Veronica, a brief human agent." },
+                { role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText }
+            ],
+        });
 
-            // 1. Get Text Response from OpenAI
-            const completion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: [
-                    { role: "system", content: "You are Veronica, a human receptionist. Be very brief (max 15 words)." },
-                    { role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText }
-                ],
-            });
+        const replyText = completion.choices[0].message.content;
 
-            const replyText = completion.choices[0].message.content;
+        // 2. Send Text immediately
+        ws.send(JSON.stringify({ type: 'text', content: replyText }));
 
-            // 2. Send Text to Browser immediately for UI
-            ws.send(JSON.stringify({ type: 'text', content: replyText }));
-
-            // 3. Generate Audio via Deepgram Aura
-            const response = await deepgram.speak.request(
-                { text: replyText },
-                { model: "aura-aura-en", encoding: "linear16", sample_rate: 48000 }
-            );
-
-            const buffer = await response.getBuffer();
-            
-            // 4. Send RAW Audio Buffer
-            if (buffer) {
-                ws.send(buffer); 
+        // 3. Generate Audio (Specifically requesting 'wav' for browser compatibility)
+        const response = await deepgram.speak.request(
+            { text: replyText },
+            { 
+                model: "aura-aura-en", 
+                container: "wav",      // This adds the header Chrome/Safari need
+                encoding: "linear16", 
+                sample_rate: 48000 
             }
+        );
 
-        } catch (error) {
-            console.error('Server Error:', error);
+        // Get the stream as a buffer
+        const stream = await response.getStream();
+        if (stream) {
+            const buffer = await response.getBuffer();
+            console.log("Deepgram Buffer Generated, size:", buffer.byteLength);
+            
+            // 4. Send the binary audio
+            ws.send(buffer); 
+        } else {
+            console.error("Deepgram failed to generate a stream.");
         }
-    });
+
+    } catch (error) {
+        console.error('Veronica Server Error:', error);
+    }
 });
+    });
