@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const OpenAI = require('openai');
 const { createClient } = require("@deepgram/sdk");
-const axios = require('axios'); // For talking to WordPress
+const axios = require('axios');
 
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
@@ -9,16 +9,11 @@ const wss = new WebSocket.Server({ port });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
-// UPDATE THIS TO YOUR SITE URL
 const WP_AJAX_URL = 'https://cipr.nestingstage.com/wp-admin/admin-ajax.php';
-const HUMAN_FILLERS = [
-    "Hmm, let me look into that for you...",
-    "That's a great question, one moment...",
-    "Let me see what I can find on that...",
-    "Just checking my records here...",
-    "Sure thing, let me pull that up..."
-];
+
 wss.on('connection', (ws) => {
+    console.log("Client connected to Railway");
+
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
@@ -29,52 +24,57 @@ wss.on('connection', (ws) => {
                 action: 'get_veronica_context',
                 message: userText
             }));
+            
             const { context, global_prompt, history } = wpResponse.data;
 
+            // 2. BUILD THE DYNAMIC SYSTEM PROMPT
             const voiceAgentInstructions = `
-    ${global_prompt}
+                ${global_prompt}
 
-    ROLE: You are Veronica, a professional human receptionist at CIPR Communications.
-    MEDIUM: You are on a live voice call. 
-    
-    VOICE PROTOCOLS:
-    1. BREVITY: Keep every response under 25 words. Users hate long talking in voice.
-    2. NATURAL: Use contractions like "I'm", "We'll", and "Don't". 
-    3. PROACTIVE: If the user seems lost, ask: "Is there anything else I can help you with?"
-    4. CLOSURE: If the user says "Goodbye", "That is all", or "Thanks", say a warm goodbye and include the word "Goodbye".
-    5. SILENCE: If I send you "Are you still there?", reply with: "I'm still here if you need help, otherwise I can clear the line for you."
+                ROLE: You are Veronica, a professional human receptionist at CIPR Communications.
+                MEDIUM: You are on a live voice call. 
+                
+                VOICE PROTOCOLS:
+                1. BREVITY: Keep every response under 20 words. (Very important for voice).
+                2. NATURAL: Use contractions like "I'm", "We'll", and "Don't". 
+                3. PROACTIVE: If the user is silent or finished, ask: "Is there anything else I can help with?"
+                4. CLOSURE: If the user says "Goodbye" or "Thanks", say a warm goodbye and include the word "Goodbye".
+                5. SILENCE: If I send "Are you still there?", reply: "I'm still here! Let me know if you need anything, otherwise I'll clear the line."
 
-    WEBSITE CONTEXT: ${context}
-`;
-            // 2. BUILD THE MESSAGES (Original Logic)
+                WEBSITE CONTEXT: ${context}
+            `;
+
+            // 3. ASSEMBLE MESSAGES
             let messages = [
-                { 
-                    role: "system", 
-                    content: voiceAgentInstructions` 
-                }
+                { role: "system", content: voiceAgentInstructions } // FIXED SYNTAX HERE
             ];
             
-            // Add existing history
             if (history && history.length > 0) {
                 history.forEach(h => messages.push(h));
             }
             
-            // Add current message
             messages.push({ role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText });
 
-            // 3. GENERATE OPENAI TEXT
+            // 4. GENERATE AI RESPONSE
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
                 messages: messages,
+                temperature: 0.7, // Adds a bit of human variety
             });
             const replyText = completion.choices[0].message.content;
 
-            // 4. SEND TEXT & AUDIO
+            // Send text back to UI immediately
             ws.send(JSON.stringify({ type: 'text', content: replyText }));
 
+            // 5. GENERATE HUMAN-LIKE AUDIO
             const response = await deepgram.speak.request(
                 { text: replyText },
-                { model: "aura-asteria-en", container: "wav", encoding: "linear16" }
+                { 
+                    model: "aura-asteria-en", 
+                    container: "wav", 
+                    encoding: "linear16",
+                    prosody: { speed: 1.1 } // 1.1x speed feels more alert and human
+                }
             );
 
             const stream = await response.getStream();
@@ -85,9 +85,11 @@ wss.on('connection', (ws) => {
                 if (done) break;
                 chunks.push(value);
             }
+            
+            // Send audio buffer to browser
             ws.send(Buffer.concat(chunks));
 
-            // 5. SAVE MEMORY BACK TO WORDPRESS (Async)
+            // 6. SAVE MEMORY (Async - won't block the audio)
             axios.post(WP_AJAX_URL, new URLSearchParams({
                 action: 'save_ai_memory',
                 user_msg: userText,
@@ -98,4 +100,6 @@ wss.on('connection', (ws) => {
             console.error('Veronica Bridge Error:', error.message);
         }
     });
+
+    ws.on('close', () => console.log("Client disconnected"));
 });
