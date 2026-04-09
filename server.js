@@ -11,7 +11,13 @@ const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
 // UPDATE THIS TO YOUR SITE URL
 const WP_AJAX_URL = 'https://cipr.nestingstage.com/wp-admin/admin-ajax.php';
-
+const HUMAN_FILLERS = [
+    "Hmm, let me look into that for you...",
+    "That's a great question, one moment...",
+    "Let me see what I can find on that...",
+    "Just checking my records here...",
+    "Sure thing, let me pull that up..."
+];
 wss.on('connection', (ws) => {
     ws.on('message', async (message) => {
         try {
@@ -25,11 +31,26 @@ wss.on('connection', (ws) => {
             }));
             const { context, global_prompt, history } = wpResponse.data;
 
+            const voiceAgentInstructions = `
+    ${global_prompt}
+
+    ROLE: You are Veronica, a professional human receptionist at CIPR Communications.
+    MEDIUM: You are on a live voice call. 
+    
+    VOICE PROTOCOLS:
+    1. BREVITY: Keep every response under 25 words. Users hate long talking in voice.
+    2. NATURAL: Use contractions like "I'm", "We'll", and "Don't". 
+    3. PROACTIVE: If the user seems lost, ask: "Is there anything else I can help you with?"
+    4. CLOSURE: If the user says "Goodbye", "That is all", or "Thanks", say a warm goodbye and include the word "Goodbye".
+    5. SILENCE: If I send you "Are you still there?", reply with: "I'm still here if you need help, otherwise I can clear the line for you."
+
+    WEBSITE CONTEXT: ${context}
+`;
             // 2. BUILD THE MESSAGES (Original Logic)
             let messages = [
                 { 
                     role: "system", 
-                    content: `${global_prompt}\n\nROLE: Veronica, human receptionist.\nSTYLE: Brief (under 20 words).\nWEBSITE CONTEXT: ${context}` 
+                    content: voiceAgentInstructions` 
                 }
             ];
             
