@@ -1,53 +1,51 @@
 const WebSocket = require('ws');
 const OpenAI = require('openai');
+const { createClient } = require("@deepgram/sdk");
 
-// Railway provides the PORT environment variable automatically
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
-// Initialize OpenAI using Railway Environment Variables
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
 wss.on('connection', (ws) => {
-    console.log('Veronica connected to a new caller.');
+    console.log('Veronica: Call connected');
 
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
 
             if (data.type === 'chat') {
-                const stream = await openai.chat.completions.create({
+                const completion = await openai.chat.completions.create({
                     model: "gpt-4o-mini",
                     messages: [
-                        { 
-                            role: "system", 
-                            content: `You are Veronica, a warm, professional human receptionist at CIPR Communications. 
-                                     Style: Under 20 words. No markdown. Use natural contractions. 
-                                     Context: ${data.context || "General inquiry"}` 
-                        },
+                        { role: "system", content: "You are Veronica, a warm human receptionist. Be brief (under 15 words)." },
                         { role: "user", content: data.text }
                     ],
-                    stream: true,
                 });
 
-                for await (const chunk of stream) {
-                    const content = chunk.choices[0]?.delta?.content || "";
-                    if (content) {
-                        // Send text chunks as soon as they are generated
-                        ws.send(JSON.stringify({ type: 'text', content }));
-                    }
+                const replyText = completion.choices[0].message.content;
+
+                // 1. Send the text back so the UI updates
+                ws.send(JSON.stringify({ type: 'text', content: replyText }));
+
+                // 2. Request human-like audio from Deepgram Aura
+                const response = await deepgram.speak.request(
+                    { text: replyText },
+                    { model: "aura-aura-en" } // Aura is the fastest for conversation
+                );
+
+                const stream = await response.getStream();
+                if (stream) {
+                    const buffer = await response.getBuffer();
+                    // 3. Send the raw audio buffer to the browser
+                    ws.send(buffer);
                 }
-                ws.send(JSON.stringify({ type: 'end' }));
             }
         } catch (error) {
             console.error('Error:', error);
-            ws.send(JSON.stringify({ type: 'error', content: "I'm sorry, I'm having trouble connecting." }));
         }
     });
-
-    ws.on('close', () => console.log('Caller disconnected.'));
 });
 
-console.log(`WSS Server active on port ${port}`);
+console.log(`Server running on ${port}`);
