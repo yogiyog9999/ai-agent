@@ -9,7 +9,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
 wss.on('connection', (ws) => {
-    console.log('Caller connected to Veronica');
+    console.log('Veronica: Call connected');
 
     ws.on('message', async (message) => {
         try {
@@ -20,31 +20,39 @@ wss.on('connection', (ws) => {
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
                 messages: [
-                    { role: "system", content: "You are Veronica, a receptionist. Be very brief (max 12 words)." },
+                    { role: "system", content: "You are Veronica, a warm receptionist. Under 15 words." },
                     { role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText }
                 ],
             });
 
             const replyText = completion.choices[0].message.content;
 
-            // 2. Send Text back to Browser
+            // 2. Send Text back for UI
             ws.send(JSON.stringify({ type: 'text', content: replyText }));
 
-            // 3. Deepgram Text-to-Speech (Aura)
-            // Note: In SDK v3, we use speak.request()
+            // 3. Deepgram Text-to-Speech
             const response = await deepgram.speak.request(
                 { text: replyText },
-                { model: "aura-asteria-en", encoding: "linear16", container: "wav" }
+                { model: "aura-asteria-en", container: "wav", encoding: "linear16" }
             );
 
-            // THE FIX: How to get the buffer in SDK v3
+            // THE FIX: Convert Stream to Buffer manually
             const stream = await response.getStream();
-            if (stream) {
-                const buffer = await response.getBuffer(); // This now works inside the stream check
-                console.log("Audio Buffer generated successfully, sending...");
-                ws.send(buffer); 
-            } else {
-                console.error("No stream returned from Deepgram");
+            const reader = stream.getReader();
+            let chunks = [];
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+
+            // Combine all chunks into one Buffer
+            const finalBuffer = Buffer.concat(chunks);
+
+            if (finalBuffer.length > 0) {
+                console.log("Audio Buffer sent to client:", finalBuffer.length);
+                ws.send(finalBuffer); // Send as binary frame
             }
 
         } catch (error) {
@@ -52,5 +60,3 @@ wss.on('connection', (ws) => {
         }
     });
 });
-
-console.log(`Server live on port ${port}`);
