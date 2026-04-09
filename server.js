@@ -1,4 +1,3 @@
-require('dotenv').config();
 const WebSocket = require('ws');
 const OpenAI = require('openai');
 const { createClient } = require("@deepgram/sdk");
