@@ -1,16 +1,10 @@
-const http = require('http');
 const WebSocket = require('ws');
 const OpenAI = require('openai');
 const { createClient } = require("@deepgram/sdk");
 const axios = require('axios');
 
-// 🔥 REQUIRED FOR RAILWAY
-const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end("Veronica Backend Running");
-});
-
-const wss = new WebSocket.Server({ server });
+const port = process.env.PORT || 8080;
+const wss = new WebSocket.Server({ port });
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
@@ -18,104 +12,96 @@ const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 const WP_AJAX_URL = 'https://cipr.nestingstage.com/wp-admin/admin-ajax.php';
 
 wss.on('connection', (ws) => {
-    console.log("Client connected to Veronica");
-    
-    // Track current stream to allow for interruptions
-    let currentAbortController = null;
+    console.log("Client connected to Railway");
 
     ws.on('message', async (message) => {
         try {
-            // 🔥 INTERRUPT LOGIC
-            if (currentAbortController) {
-                currentAbortController.abort();
-            }
-            currentAbortController = new AbortController();
-
-            // Ignore raw binary from mic
-            if (message instanceof Buffer) return;
-
             const data = JSON.parse(message);
             const userText = data.text;
 
-            // 1. Fetch WordPress Context
+            // 1. FETCH DATA FROM WORDPRESS
             const wpResponse = await axios.post(WP_AJAX_URL, new URLSearchParams({
                 action: 'get_veronica_context',
                 message: userText
             }));
-
+            
             const { context, global_prompt, history } = wpResponse.data;
 
-            const systemPrompt = `${global_prompt}\n\nYou are Veronica, receptionist.\nKeep responses under 20 words.\n\n${context}`;
+            // 2. BUILD THE DYNAMIC SYSTEM PROMPT
+            const voiceAgentInstructions = `
+                ${global_prompt}
 
-            let messages = [{ role: "system", content: systemPrompt }];
-            if (history) history.forEach(h => messages.push(h));
-            messages.push({ role: "user", content: userText });
+                ROLE: You are Veronica, a professional human receptionist at CIPR Communications.
+                MEDIUM: You are on a live voice call. 
+                
+                VOICE PROTOCOLS:
+                1. BREVITY: Keep every response under 20 words. (Very important for voice).
+                2. NATURAL: Use contractions like "I'm", "We'll", and "Don't". 
+                3. PROACTIVE: If the user is silent or finished, ask: "Is there anything else I can help with?"
+                4. CLOSURE: If the user says "Goodbye" or "Thanks", say a warm goodbye and include the word "Goodbye".
+                5. SILENCE: If I send "Are you still there?", reply: "I'm still here! Let me know if you need anything, otherwise I'll clear the line."
 
-            // 2. Generate Text Response
+                WEBSITE CONTEXT: ${context}
+            `;
+
+            // 3. ASSEMBLE MESSAGES
+            let messages = [
+                { role: "system", content: voiceAgentInstructions } // FIXED SYNTAX HERE
+            ];
+            
+            if (history && history.length > 0) {
+                history.forEach(h => messages.push(h));
+            }
+            
+            messages.push({ role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText });
+
+            // 4. GENERATE AI RESPONSE
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
-                messages
-            }, { signal: currentAbortController.signal });
-
+                messages: messages,
+                temperature: 0.7, // Adds a bit of human variety
+            });
             const replyText = completion.choices[0].message.content;
 
-            // Send text to UI
+            // Send text back to UI immediately
             ws.send(JSON.stringify({ type: 'text', content: replyText }));
 
-            // 3. Generate Audio Stream (ALEXA STYLE)
-            ws.send(JSON.stringify({ type: "audio_start" }));
-            console.log("Deepgram: Requesting audio for:", replyText);
+            // 5. GENERATE HUMAN-LIKE AUDIO
+            const response = await deepgram.speak.request(
+    { text: replyText },
+    { 
+        model: "aura-asteria-en",
+        container: "wav",
+        encoding: "linear16",
+        prosody: { speed: 1.1 }
+    }
+);
 
-            try {
-                const response = await deepgram.speak.request(
-                    { text: replyText },
-                    { 
-                        model: "aura-asteria-en", 
-                        encoding: "linear16", 
-                        container: "none", 
-                        sample_rate: 24000 
-                    }
-                );
+            const stream = await response.getStream();
+            const reader = stream.getReader();
+            let chunks = [];
+            while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
 
-                const stream = await response.getStream();
-                const reader = stream.getReader();
+    // Send each chunk immediately
+    ws.send(value);
+}
+            
+            // Send audio buffer to browser
+            ws.send(Buffer.concat(chunks));
 
-                let chunkCount = 0;
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) {
-                        console.log(`Deepgram: Stream finished. Sent ${chunkCount} chunks.`);
-                        break;
-                    }
+            // 6. SAVE MEMORY (Async - won't block the audio)
+            axios.post(WP_AJAX_URL, new URLSearchParams({
+                action: 'save_ai_memory',
+                user_msg: userText,
+                ai_msg: replyText
+            })).catch(e => console.log("Memory Save Error"));
 
-                    if (value && value.byteLength > 0) {
-                        ws.send(value); 
-                        chunkCount++;
-                    }
-                }
-                ws.send(JSON.stringify({ type: "audio_end" }));
-
-            } catch (dgError) {
-                console.error("Deepgram Error:", dgError.message);
-                ws.send(JSON.stringify({ type: "error", message: "Audio generation failed" }));
-            }
-
-        } catch (err) {
-            if (err.name === 'AbortError') {
-                console.log("Request aborted due to interruption.");
-            } else {
-                console.error("Main Process Error:", err.message);
-            }
+        } catch (error) {
+            console.error('Veronica Bridge Error:', error.message);
         }
     });
 
-    ws.on('close', () => {
-        if (currentAbortController) currentAbortController.abort();
-        console.log("Disconnected");
-    });
-});
-
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-    console.log("Server running on port", PORT);
+    ws.on('close', () => console.log("Client disconnected"));
 });
