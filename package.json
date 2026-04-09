@@ -1,0 +1,16 @@
+{
+  "name": "veronica-voice-agent",
+  "version": "1.1.0",
+  "description": "High-speed WebSocket voice agent for Veronica",
+  "main": "server.js",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "openai": "^4.33.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
