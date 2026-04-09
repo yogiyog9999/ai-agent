@@ -68,23 +68,25 @@ wss.on('connection', (ws) => {
 
             // 5. GENERATE HUMAN-LIKE AUDIO
             const response = await deepgram.speak.request(
-                { text: replyText },
-                { 
-                    model: "aura-asteria-en", 
-                    container: "wav", 
-                    encoding: "linear16",
-                    prosody: { speed: 1.1 } // 1.1x speed feels more alert and human
-                }
-            );
+    { text: replyText },
+    { 
+        model: "aura-asteria-en",
+        container: "wav",
+        encoding: "linear16",
+        prosody: { speed: 1.1 }
+    }
+);
 
             const stream = await response.getStream();
             const reader = stream.getReader();
             let chunks = [];
             while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    // Send each chunk immediately
+    ws.send(value);
+}
             
             // Send audio buffer to browser
             ws.send(Buffer.concat(chunks));
