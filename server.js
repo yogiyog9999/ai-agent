@@ -12,103 +12,93 @@ const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 const WP_AJAX_URL = 'https://cipr.nestingstage.com/wp-admin/admin-ajax.php';
 
 wss.on('connection', (ws) => {
-    console.log("Client connected to Railway");
+
+    console.log("Client connected");
 
     ws.on('message', async (message) => {
+
         try {
+
             const data = JSON.parse(message);
             const userText = data.text;
 
-            // 1. FETCH DATA FROM WORDPRESS
+            // 🔥 1. FETCH WORDPRESS DATA (RAG)
             const wpResponse = await axios.post(WP_AJAX_URL, new URLSearchParams({
                 action: 'get_veronica_context',
                 message: userText
             }));
-            
+
             const { context, global_prompt, history } = wpResponse.data;
 
-            // 2. BUILD THE DYNAMIC SYSTEM PROMPT
-            const voiceAgentInstructions = `
+            // 🔥 2. BUILD PROMPT
+            const systemPrompt = `
                 ${global_prompt}
 
-                ROLE: You are Veronica, a professional human receptionist at CIPR Communications.
-                MEDIUM: You are on a live voice call. 
-                
-                VOICE PROTOCOLS:
-                1. BREVITY: Keep every response under 20 words. (Very important for voice).
-                2. NATURAL: Use contractions like "I'm", "We'll", and "Don't". 
-                3. PROACTIVE: If the user is silent or finished, ask: "Is there anything else I can help with?"
-                4. CLOSURE: If the user says "Goodbye" or "Thanks", say a warm goodbye and include the word "Goodbye".
-                5. SILENCE: If I send "Are you still there?", reply: "I'm still here! Let me know if you need anything, otherwise I'll clear the line."
+                ROLE: You are Veronica, a human receptionist.
+                Keep responses under 20 words.
+                Speak naturally like a human.
 
-                WEBSITE CONTEXT: ${context}
+                WEBSITE DATA:
+                ${context}
             `;
 
-            // 3. ASSEMBLE MESSAGES
             let messages = [
-                { role: "system", content: voiceAgentInstructions } // FIXED SYNTAX HERE
+                { role: "system", content: systemPrompt }
             ];
-            
-            if (history && history.length > 0) {
+
+            // 🔥 HISTORY
+            if (history && history.length) {
                 history.forEach(h => messages.push(h));
             }
-            
-            messages.push({ role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText });
 
-            // 4. GENERATE AI RESPONSE
+            messages.push({ role: "user", content: userText });
+
+            // 🔥 3. AI RESPONSE
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
-                messages: messages,
-                temperature: 0.7, // Adds a bit of human variety
+                messages,
+                temperature: 0.7
             });
+
             const replyText = completion.choices[0].message.content;
 
-            // Send text back to UI immediately
+            // 👉 Send TEXT instantly
             ws.send(JSON.stringify({ type: 'text', content: replyText }));
 
-            // 5. GENERATE HUMAN-LIKE AUDIO
-           
+            // 🔥 4. STREAM AUDIO (ALEXA STYLE)
+            ws.send(JSON.stringify({ type: "audio_start" }));
 
-           // 5. STREAM AUDIO (FINAL VERSION)
+            const dgResponse = await deepgram.speak.request(
+                { text: replyText },
+                {
+                    model: "aura-asteria-en",
+                    container: "mp3" // ✅ IMPORTANT
+                }
+            );
 
-ws.send(JSON.stringify({ type: "audio_start" }));
+            const stream = await dgResponse.getStream();
+            const reader = stream.getReader();
 
-const response = await deepgram.speak.request(
-    { text: replyText },
-    { 
-        model: "aura-asteria-en",
-        container: "wav",
-        encoding: "linear16",
-        prosody: { speed: 1.1 }
-    }
-);
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
 
-const stream = await response.getStream();
-const reader = stream.getReader();
+                ws.send(value); // 🎧 STREAM CHUNK
+            }
 
-while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+            ws.send(JSON.stringify({ type: "audio_end" }));
 
-    ws.send(value); // 🔥 real-time chunks
-}
-
-ws.send(JSON.stringify({ type: "audio_end" }));
-      
-            
-            // Send audio buffer to browser
-
-            // 6. SAVE MEMORY (Async - won't block the audio)
+            // 🔥 5. SAVE MEMORY (ASYNC)
             axios.post(WP_AJAX_URL, new URLSearchParams({
                 action: 'save_ai_memory',
                 user_msg: userText,
                 ai_msg: replyText
-            })).catch(e => console.log("Memory Save Error"));
+            })).catch(() => {});
 
-        } catch (error) {
-            console.error('Veronica Bridge Error:', error.message);
+        } catch (err) {
+            console.log("Error:", err.message);
         }
     });
 
-    ws.on('close', () => console.log("Client disconnected"));
+    ws.on('close', () => console.log("Disconnected"));
 });
