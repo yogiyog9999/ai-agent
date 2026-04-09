@@ -33,10 +33,10 @@ ws.on('message', async (message) => {
         const response = await deepgram.speak.request(
             { text: replyText },
             { 
-                model: "aura-aura-en", 
-                container: "wav",      // This adds the header Chrome/Safari need
-                encoding: "linear16", 
-                sample_rate: 48000 
+            model: "aura-asteria-en", // Try Asteria (very stable)
+            container: "wav", 
+            encoding: "linear16", 
+            sample_rate: 48000
             }
         );
 
