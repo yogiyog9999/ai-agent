@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const http = require('http');
@@ -19,110 +18,83 @@ app.get('/health', (req, res) => {
     deepgram: !!deepgram 
   });
 });
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY || 'demo');
 let sessionCount = 0;
 
 wss.on('connection', (ws) => {
   const sessionId = ++sessionCount;
-  console.log(`[DEBUG] 👤 Session ${sessionId} connected (${wss.clients.size} active)`);
+  console.log(`[DEBUG] 👤 Session ${sessionId} connected`);
   
-  let dgLive;
-  
-  // Heartbeat every 30s - Railway killer
-  const heartbeat = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-      console.log(`[HEARTBEAT] Session ${sessionId} alive`);
-    }
-  }, 30000);
-  
-  ws.on('pong', () => console.log(`[PONG] Session ${sessionId}`));
-  
-  try {
-   dgLive = deepgram.listen.live({
-  model: 'nova-3-general',
-  language: 'en-US',
-  endpointing: 1500,     // 1.5s silence = phrase end
-  vad_turnaround_ms: 200,
-  utterance_end_ms: 2000,
-  interim_results: true, // Get partials too
-  smart_format: true,
-  punctuate: true
-});
+  // 1. Setup Deepgram Live with explicit encoding
+  const dgLive = deepgram.listen.live({
+    model: 'nova-3-general',
+    language: 'en-US',
+    smart_format: true,
+    // CRITICAL: Most browser MediaRecorders use opus/webm
+    encoding: 'opus', 
+    sample_rate: 48000, 
+    interim_results: true,
+    endpointing: 1500,
+    utterance_end_ms: 2000,
+    vad_turnaround_ms: 200,
+  });
 
-// Debug ALL events
-dgLive.on('metadata', (data) => console.log(`[META ${sessionId}]`, data));
-dgLive.on('speech_started', () => console.log(`[SPEECH START ${sessionId}]`));
-dgLive.on('utterance_end', (data) => console.log(`[UTTERANCE END ${sessionId}]`, data));
-dgLive.on('close', () => console.log(`[DG CLOSE ${sessionId}]`));
-    
-    console.log(`[DEBUG] 🔊 Deepgram LIVE for session ${sessionId}`);
-    
-    dgLive.on('open', () => console.log(`[DEBUG] Deepgram WS open session ${sessionId}`));
-    dgLive.on('close', () => console.log(`[DEBUG] Deepgram WS close session ${sessionId}`));
-    
-   dgLive.on('transcript', (data) => {
-  const alt = data.channel?.alternatives?.[0];
-  const transcript = alt?.transcript?.trim() || '';
-  const isFinal = data.is_final;
-  const speechFinal = data.speech_final;
-  const conf = alt?.confidence || 0;
-  
-  console.log(`[T ${sessionId}] "${transcript}" final=${isFinal} speechFinal=${speechFinal} conf=${conf.toFixed(2)}`);
-  
-  if (transcript.length > 1) {
-    ws.send(JSON.stringify({ 
-      type: 'text', 
-      delta: `🔍 "${transcript}" (${conf.toFixed(2)}) - WP search...` 
-    }));
-    
-    if (isFinal || speechFinal) {
+  let dgReady = false;
+
+  // 2. Listeners must be attached immediately
+  dgLive.on('open', () => {
+    dgReady = true;
+    console.log(`[DEBUG] Deepgram WS opened for session ${sessionId}`);
+  });
+
+  dgLive.on('transcript', (data) => {
+    const transcript = data.channel?.alternatives?.[0]?.transcript?.trim() || '';
+    const isFinal = data.is_final;
+    const speechFinal = data.speech_final;
+
+    if (transcript.length > 0) {
+      console.log(`[T ${sessionId}] "${transcript}" (Final: ${isFinal})`);
+      
       ws.send(JSON.stringify({ 
         type: 'text', 
-        delta: `\n✅ Matched wp_ai_vectors row 1: Digital PR Agency for Tourism!` 
+        delta: transcript,
+        isFinal: isFinal || speechFinal
       }));
     }
-  }
-});
-    
-    dgLive.on('error', (err) => {
-      console.error(`[DEEPGRAM ERROR ${sessionId}]`, err);
-    });
-    
-  } catch (err) {
-    console.error(`[DEEPGRAM INIT ERROR ${sessionId}]`, err.message);
-  }
-  
-  let chunkCount = 0;
+  });
+
+  dgLive.on('error', (err) => console.error(`[DG ERROR ${sessionId}]`, err));
+  dgLive.on('close', () => console.log(`[DG CLOSE ${sessionId}] Connection closed`));
+
+  // 3. Handle incoming audio from Client
   ws.on('message', (data) => {
-    chunkCount++;
-    const size = data.length;
-    console.log(`[AUDIO ${sessionId}] Chunk #${chunkCount} size=${size}B`);
-    
-    if (dgLive && size > 50) {
+    // Only send to Deepgram if the connection is actually open
+    if (dgReady && dgLive.getReadyState() === 1) {
       dgLive.send(data);
     }
   });
-  
+
+  // Heartbeat to keep Railway connection alive
+  const heartbeat = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
+  }, 30000);
+
   ws.on('close', () => {
+    console.log(`[CLOSE] Session ${sessionId} ended`);
     clearInterval(heartbeat);
-    if (dgLive) dgLive.finish();
-    console.log(`[CLOSE] Session ${sessionId} ended (chunks: ${chunkCount})`);
+    dgLive.finish();
   });
-  
-  ws.on('error', (err) => console.error(`[WS ERROR ${sessionId}]`, err));
 });
 
-// Railway health + graceful SIGTERM
 process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received - cleaning up');
   wss.clients.forEach(ws => ws.close());
   process.exit(0);
 });
 
 server.listen(process.env.PORT || 8080, '0.0.0.0', () => {
-  console.log('🚀 DEBUG AGENT LIVE - Check /health');
+  console.log('🚀 Server running on port', process.env.PORT || 8080);
 });
