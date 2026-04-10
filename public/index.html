@@ -1,69 +1,91 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AI Voice Debugger</title>
+    <title>AI Voice Agent</title>
     <style>
-        body { font-family: sans-serif; text-align: center; padding: 20px; background: #1a1a1a; color: white; }
-        #transcript { margin: 20px auto; width: 80%; padding: 20px; background: #2a2a2a; border-radius: 8px; min-height: 100px; border: 1px solid #444; color: #00ff00; }
-        #v-meter { width: 200px; height: 20px; background: #333; margin: 10px auto; border-radius: 10px; overflow: hidden; }
-        #v-level { width: 0%; height: 100%; background: #00ff00; transition: width 0.1s; }
-        button { padding: 15px 40px; font-size: 1.2rem; background: #007bff; color: white; border: none; border-radius: 50px; cursor: pointer; }
+        body { font-family: sans-serif; text-align: center; padding: 40px; background: #121212; color: white; }
+        #transcript { margin: 20px auto; width: 70%; padding: 20px; background: #1e1e1e; border-radius: 12px; min-height: 100px; border: 1px solid #333; line-height: 1.6; }
+        button { padding: 16px 32px; font-size: 1.1rem; background: #007bff; color: white; border: none; border-radius: 30px; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #0056b3; }
+        #status { color: #888; margin-top: 15px; font-size: 0.9rem; }
+        .ai-text { color: #00ffcc; font-weight: bold; }
     </style>
 </head>
 <body>
-    <h1>🎤 Voice Agent Debugger</h1>
-    <div id="v-meter"><div id="v-level"></div></div>
-    <div id="status">Ready</div>
-    <div id="transcript">Transcripts will appear here...</div>
-    <button id="startBtn">Start Debugging</button>
+    <h1>🎙️ AI Voice Agent</h1>
+    <div id="transcript">Click start and say something...</div>
+    <div id="status">Status: Ready</div>
+    <br>
+    <button id="startBtn">🎤 Start Agent</button>
 
     <script>
-        let ws, mediaRecorder, audioCtx, analyser, dataArray;
+        let ws, mediaRecorder;
         const startBtn = document.getElementById('startBtn');
+        const transcriptDiv = document.getElementById('transcript');
+        const statusDiv = document.getElementById('status');
 
-        async function start() {
-            console.log("Starting debug session...");
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
-            // --- VOLUME METER LOGIC ---
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const source = audioCtx.createMediaStreamSource(stream);
-            analyser = audioCtx.createAnalyser();
-            source.connect(analyser);
-            dataArray = new Uint8Array(analyser.frequencyBinCount);
-            
-            function updateMeter() {
-                analyser.getByteFrequencyData(dataArray);
-                const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-                document.getElementById('v-level').style.width = Math.min(average * 2, 100) + '%';
-                requestAnimationFrame(updateMeter);
-            }
-            updateMeter();
-            // --------------------------
-
-            ws = new WebSocket(`wss://${window.location.host}`);
-            
-            ws.onopen = () => {
-                document.getElementById('status').textContent = "CONNECTED TO SERVER";
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-                mediaRecorder.ondataavailable = (e) => {
-                    if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
-                };
-                mediaRecorder.start(250);
-            };
-
-            ws.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'text') {
-                    document.getElementById('transcript').innerText = msg.delta;
-                    // Speak back
-                    const utter = new SpeechSynthesisUtterance(msg.delta);
-                    window.speechSynthesis.speak(utter);
-                }
-            };
+        // This function handles the "AI Speaking"
+        function speak(text) {
+            // Cancel any current speech so it doesn't overlap
+            window.speechSynthesis.cancel(); 
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.0; 
+            utterance.pitch = 1.0;
+            window.speechSynthesis.speak(utterance);
         }
 
-        startBtn.onclick = start;
+        async function startAgent() {
+            startBtn.disabled = true;
+            statusDiv.textContent = "Status: Initializing Mic...";
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // Use the Railway URL
+                ws = new WebSocket(`wss://${window.location.host}`);
+                
+                ws.onopen = () => {
+                    statusDiv.textContent = "Status: Connected. Start talking!";
+                    
+                    // WebM/Opus is standard for Deepgram
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+                    
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (ws.readyState === WebSocket.OPEN && e.data.size > 0) {
+                            ws.send(e.data);
+                        }
+                    };
+                    
+                    // Send audio in small 250ms chunks for low latency
+                    mediaRecorder.start(250);
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'text') {
+                        transcriptDiv.innerHTML = `<span class="ai-text">You:</span> ${data.delta}`;
+                        
+                        // Speak the response when a sentence is finalized
+                        if (data.isFinal) {
+                            speak(data.delta);
+                        }
+                    }
+                };
+
+                ws.onclose = () => {
+                    statusDiv.textContent = "Status: Disconnected. Refresh to try again.";
+                    startBtn.disabled = false;
+                };
+
+            } catch (err) {
+                console.error(err);
+                statusDiv.textContent = "Status: Error - " + err.message;
+                startBtn.disabled = false;
+            }
+        }
+
+        startBtn.onclick = startAgent;
     </script>
 </body>
 </html>
