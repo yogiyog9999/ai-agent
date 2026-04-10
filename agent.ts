@@ -12,28 +12,33 @@ import 'dotenv/config';
 
 export default defineAgent({
   entry: async (ctx: JobContext) => {
-    // 1. Establish the WebRTC connection
-    await ctx.connect();
-    console.log(`Agent "Veronica" connected to room: ${ctx.room.name}`);
+    try {
+      await ctx.connect();
+      console.log(`CONNECTED to: ${ctx.room.name}`);
 
-    // 2. Build the AI Pipeline (The "Brain" and "Voice")
-    const agent = new voice.VoicePipelineAgent(
-      new deepgram.STT(), // Speech-to-Text (Fastest in 2026)
-      new openai.LLM({ model: 'gpt-4o-mini' }), // Cost-effective brain
-      new openai.TTS(), // Natural voice output
-      {
-        chatContext: new llm.ChatContext().append({
-          role: llm.ChatRole.SYSTEM,
-          text: "You are Veronica, a professional AI assistant. Keep responses short and helpful.",
-        }),
-      }
-    );
+      const agent = new voice.VoicePipelineAgent(
+        new deepgram.STT(), 
+        new openai.LLM({ model: 'gpt-4o-mini' }), 
+        new openai.TTS(),
+        {
+          chatContext: new llm.ChatContext().append({
+            role: llm.ChatRole.SYSTEM,
+            text: "You are Veronica, a helpful assistant. Keep it short.",
+          }),
+        }
+      );
 
-    // 3. Join and greet the user
-    agent.start(ctx.room);
-    await agent.say("Hello Daniel, I'm online and ready to help.");
+      console.log("Starting agent...");
+      agent.start(ctx.room);
+      
+      await agent.say("I am online. How can I help?");
+      console.log("Agent is now talking and listening!");
+
+    } catch (error) {
+      // THIS WILL PRINT THE EXACT ERROR IN YOUR TERMINAL
+      console.error("FATAL ERROR IN AGENT:", error);
+    }
   },
 });
 
-// Start the agent worker
 cli.runApp(new WorkerOptions({ agent: './agent.ts' }));
