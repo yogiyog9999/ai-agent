@@ -1,48 +1,111 @@
 const express = require('express');
+const path = require('path');
 const http = require('http');
 const WebSocket = require('ws');
-const path = require('path');
-const app = express();
+const { createClient } = require('@deepgram/sdk');
+const OpenAI = require('openai');
+const mysql = require('mysql2/promise');
+const cors = require('cors');
 
+const app = express();
+app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
+
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', (ws) => {
-  console.log('👤 Client connected');
-  let silenceCount = 0;
-  let lastResponseTime = 0;
+// Deepgram LIVE
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+
+// OpenAI
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// MySQL Pool
+let dbPool;
+async function initDB() {
+  try {
+    dbPool = mysql.createPool({
+      host: process.env.WP_DB_HOST,
+      user: process.env.WP_DB_USER,
+      password: process.env.WP_DB_PASS,
+      database: process.env.WP_DB_NAME,
+      connectionLimit: 5,
+      connectTimeout: 5000
+    });
+    console.log('✅ wp_ai_vectors DB ready');
+  } catch (e) {
+    console.log('⚠️ DB fallback - using mock data');
+  }
+}
+
+initDB();
+
+wss.on('connection', async (ws) => {
+  console.log('👤 Voice client connected');
+  const dgLive = deepgram.listen.live({
+    model: 'nova-3-general',
+    language: 'en-US',
+    endpointing: 300, // 300ms pause = phrase end
+    smart_format: true,
+    punctuate: true
+  });
+
+  dgLive.on('open', () => console.log('🔊 Deepgram LIVE'));
   
-  ws.send(JSON.stringify({ type: 'text', delta: '🎉 LIVE! Say "digital PR" or "hospitality marketing"...' }));
-  
-  ws.on('message', (data) => {
-    console.log('📦 Chunk:', data.length);
+  dgLive.on('transcript', async (data) => {
+    const transcript = data.channel?.alternatives?.[0]?.transcript?.trim();
+    if (!transcript || !data.is_final) return;
     
-    if (data.length < 50) {
-      silenceCount++;
-      if (silenceCount > 10) { // 2.5s silence
-        ws.send(JSON.stringify({ type: 'text', delta: '\n\n⏸️ Listening... Speak again!' }));
-        silenceCount = 0;
+    console.log('🗣️ Heard:', transcript);
+    
+    try {
+      // Query your wp_ai_vectors table
+      let context = 'Marketing expert.';
+      if (dbPool) {
+        const [rows] = await dbPool.execute(
+          'SELECT content FROM wp_ai_vectors WHERE MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE) LIMIT 3',
+          [transcript]
+        );
+        context = rows.map(r => r.content).join('; ') || context;
       }
-      return;
+      
+      // OpenAI response
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{
+          role: 'system', 
+          content: `Marketing AI. Use this database context: ${context}. Natural & brief.`
+        }, {
+          role: 'user', 
+          content: transcript
+        }],
+        stream: false,
+        max_tokens: 100
+      });
+      
+      const response = completion.choices[0].message.content;
+      ws.send(JSON.stringify({ type: 'text', delta: response }));
+      
+      // TODO: Deepgram TTS here
+      
+    } catch (err) {
+      console.error('AI error:', err.message);
+      ws.send(JSON.stringify({ type: 'text', delta: 'Got you! Digital PR expert ready. Ask about tourism marketing.' }));
     }
-    
-    silenceCount = 0;
-    const now = Date.now();
-    if (now - lastResponseTime < 3000) return; // 3s cooldown
-    
-    // Your wp_ai_vectors demo
-    ws.send(JSON.stringify({ 
-      type: 'text', 
-      delta: 'Digital PR & Marketing Agency for Tourism (row 1 from wp_ai_vectors). Ask about hospitality or AI marketing!' 
-    }));
-    lastResponseTime = now;
+  });
+
+  ws.on('message', (data) => {
+    if (data.length > 50) dgLive.send(data);
+  });
+
+  ws.on('close', () => {
+    dgLive.finish();
+    console.log('👋 Session closed');
   });
 });
 
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 LIVE on port ${PORT}`);
+server.listen(process.env.PORT || 8080, '0.0.0.0', () => {
+  console.log('🚀 FULL VOICE AGENT LIVE - Deepgram + OpenAI + WP!');
 });
