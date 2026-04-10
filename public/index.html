@@ -1,144 +1,53 @@
-
 <!DOCTYPE html>
 <html>
-<head>
-  <title>AI Marketing Voice Agent</title>
-  <style>
-    body { font-family: Arial; text-align: center; padding: 50px; background: #f0f8ff; }
-    #transcript { margin: 20px; padding: 20px; background: white; border-radius: 10px; min-height: 100px; }
-    button { padding: 15px 30px; font-size: 18px; background: #007bff; color: white; border: none; border-radius: 25px; cursor: pointer; }
-    button:hover { background: #0056b3; }
-    button:disabled { background: #6c757d; cursor: not-allowed; }
-  </style>
-</head>
 <body>
-  <h1>🤖 AI Marketing Agent</h1>
-  <p>Powered by OpenAI + Deepgram + Your WP Database</p>
-  
-  <button id="startBtn">🎤 Start Listening</button>
-  <br><br>
-  
-  <div id="transcript">Speak about marketing/digital agencies... (e.g., "digital PR tourism")</div>
-  <div id="status">Ready</div>
+  <button id="start">🎤 Start Session</button>
+  <div id="output" style="white-space: pre-wrap; font-family: monospace; padding: 20px;"></div>
 
   <script>
-    let ws, mediaRecorder, stream, transcriptDiv, statusDiv;
+    let audioContext;
+    let ws;
 
-  async function initVoice() {
-    const startBtn = document.getElementById('startBtn');
-    transcriptDiv = document.getElementById('transcript');
-    statusDiv = document.getElementById('status');
-    
-    if (!startBtn || !transcriptDiv || !statusDiv) {
-      console.error('DOM elements missing');
-      return;
-    }
-    
-    startBtn.disabled = true;
-    statusDiv.textContent = 'Initializing mic...';
-    
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error('Browser not supported');
-      }
+    document.getElementById('start').onclick = async () => {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      await audioContext.resume();
       
-      stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 24000
-        }
-      });
-      
-      if (!stream.active) {
-        throw new Error('Stream not active');
-      }
-      
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
-        ? 'audio/webm;codecs=opus' 
-        : 'audio/webm';
-      
-      mediaRecorder = new MediaRecorder(stream, { mimeType });
-      
-      statusDiv.textContent = 'Connecting...';
-      ws = new WebSocket(`wss://ai-agent-production-d2dd.up.railway.app/`);
+      ws = new WebSocket(`ws://${location.host}`);
       ws.binaryType = 'arraybuffer';
-      
-      ws.onopen = () => {
-  statusDiv.textContent = '🎤 Listening... Speak now!';
-  mediaRecorder.start(250); // 250ms chunks - stable across browsers
-};
 
-// Skip 0B chunks + retry logic
-mediaRecorder.ondataavailable = (e) => {
-  console.log('Chunk size:', e.data?.size || 0); // Debug
-  if (ws.readyState === WebSocket.OPEN && e.data && e.data.size > 10) { // >10B threshold
-    ws.send(e.data);
-  }
-};
-
-// Add error handling
-mediaRecorder.onerror = (e) => {
-  console.error('Recorder error:', e.error);
-  statusDiv.textContent = 'Mic error - refresh';
-};
-      
-      ws.onmessage = (event) => {
-        try {
-          if (event.data instanceof ArrayBuffer) {
-            // Play audio response
-            const audioCtx = new AudioContext();
-            audioCtx.decodeAudioData(event.data).then(buffer => {
-              const source = audioCtx.createBufferSource();
-              source.buffer = buffer;
-              source.connect(audioCtx.destination);
-              source.start();
-            });
-            return;
-          }
-          
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'text') {
-            transcriptDiv.textContent += msg.delta;
-            transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
-          } else if (msg.type === 'error') {
-            statusDiv.textContent = 'Error: ' + msg.message;
-          }
-        } catch (e) {
-          console.error('Message parse error:', e);
-        }
-      };
-      
-      ws.onclose = () => {
-        statusDiv.textContent = 'Disconnected - Refresh to retry';
-        startBtn.disabled = false;
-        startBtn.textContent = '🔄 Reconnect';
-      };
+      // 1. MIC INPUT
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
       
       mediaRecorder.ondataavailable = (e) => {
-        if (ws.readyState === WebSocket.OPEN && e.data.size > 0) {
-          ws.send(e.data);
+        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+      };
+      mediaRecorder.start(250);
+
+      // 2. AUDIO OUTPUT (RECEIVE FROM SERVER)
+      ws.onmessage = async (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          // Play binary audio
+          playOutput(event.data);
+        } else {
+          // Handle text UI
+          const data = JSON.parse(event.data);
+          document.getElementById('output').innerText += data.delta + '\n';
         }
       };
-      
-    } catch (err) {
-      console.error('Voice init error:', err);
-      statusDiv.textContent = '❌ ' + err.message + ' (HTTPS + Mic permission?)';
-      startBtn.disabled = false;
-    }
-  }
+    };
 
-  // DOM ready
-  document.addEventListener('DOMContentLoaded', () => {
-    const startBtn = document.getElementById('startBtn');
-    if (startBtn) {
-      startBtn.onclick = initVoice;
-    } else {
-      console.error('No #startBtn found');
+    async function playOutput(arrayBuffer) {
+      try {
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+      } catch (e) {
+        console.error("Audio Playback Error", e);
+      }
     }
-  });
- 
   </script>
 </body>
 </html>
