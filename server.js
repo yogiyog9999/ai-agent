@@ -1,105 +1,92 @@
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
 const WebSocket = require('ws');
+const { createClient } = require('@deepgram/sdk');
 const OpenAI = require('openai');
-const { createClient } = require("@deepgram/sdk");
-const axios = require('axios');
+const mysql = require('mysql2/promise');
+const cors = require('cors');
 
-const port = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port });
+const app = express();
+app.use(cors());
+app.use(express.static('public')); // Serve HTML/JS client
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const WP_TABLE = process.env.WP_TABLE_NAME || 'your_table';
 
-const WP_AJAX_URL = 'https://cipr.nestingstage.com/wp-admin/admin-ajax.php';
+let db;
+(async () => {
+  db = await mysql.createConnection({
+    host: process.env.WP_DB_HOST,
+    user: process.env.WP_DB_USER,
+    password: process.env.WP_DB_PASS,
+    database: process.env.WP_DB_NAME,
+    ssl: { rejectUnauthorized: false }
+  });
+})();
 
-// WAV Header Generator
-function getWavHeader(dataLength) {
-    const buffer = Buffer.alloc(44);
-    buffer.write('RIFF', 0);
-    buffer.writeUInt32LE(36 + dataLength, 4);
-    buffer.write('WAVE', 8);
-    buffer.write('fmt ', 12);
-    buffer.writeUInt32LE(16, 16);
-    buffer.writeUInt16LE(1, 20);  // PCM
-    buffer.writeUInt16LE(1, 22);  // Mono
-    buffer.writeUInt32LE(24000, 24);
-    buffer.writeUInt32LE(24000 * 2, 28);
-    buffer.writeUInt16LE(2, 32);
-    buffer.writeUInt16LE(16, 34);
-    buffer.write('data', 36);
-    buffer.writeUInt32LE(dataLength, 40);
-    return buffer;
-}
+wss.on('connection', async (ws) => {
+  console.log('Client connected');
+  const dgLive = deepgram.listen.live({
+    model: 'nova-3-general',
+    language: 'en-US',
+    smart_format: true,
+    punctuate: true
+  });
 
-wss.on('connection', (ws) => {
-    console.log("Client connected to Veronica Bridge");
+  dgLive.on('open', () => console.log('Deepgram connected'));
+  dgLive.on('transcript', async (data) => {
+    if (!data || !data.channel || !data.channel.alternatives?.[0]?.transcript) return;
+    const transcript = data.channel.alternatives[0].transcript.trim();
+    if (data.is_final && transcript) {
+      // Fast WP table query
+      const [rows] = await db.execute(`SELECT * FROM ${WP_TABLE} WHERE MATCH(content) AGAINST (?) OR name LIKE ?`, [transcript, `%${transcript}%`]);
+      const context = rows.map(row => `${row.name}: ${row.content}`).join('; ') || 'No matching data.';
 
-    ws.on('message', async (message) => {
-        try {
-            const data = JSON.parse(message);
-            
-            if (data.type === 'interrupt') {
-                return;
-            }
+      // Send to OpenAI Realtime (server-side session)
+      const realtimeWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }
+      });
 
-            const userText = data.text;
+      realtimeWs.on('open', () => {
+        realtimeWs.send(JSON.stringify({
+          type: 'session.update',
+          session: { instructions: `You are a helpful assistant. Use this WP context: ${context}. Respond conversationally.` }
+        }));
+        realtimeWs.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: transcript }] }
+        }));
+        realtimeWs.send(JSON.stringify({ type: 'response.create' }));
+      });
 
-            // 1. WORDPRESS CONTEXT
-            const wpResponse = await axios.post(WP_AJAX_URL, new URLSearchParams({
-                action: 'get_veronica_context',
-                message: userText
-            })).catch(() => ({}));
-            
-            const { context, global_prompt, history } = wpResponse.data || {};
-
-            // 2. OPENAI RESPONSE
-            const messages = [
-                { role: "system", content: `${global_prompt || "You are Veronica."} ROLE: Veronica. BREVITY: Max 20 words. CONTEXT: ${context || ""}` },
-                ...(history || []),
-                { role: "user", content: userText === "GENERATE_WELCOME_GREETING" ? "Hello" : userText }
-            ];
-
-            const completion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: messages,
-                temperature: 0.6,
-            });
-            
-            const replyText = completion.choices[0].message.content;
-
-            // Send text immediately
-            ws.send(JSON.stringify({ type: 'text', content: replyText }));
-
-            // 3. DEEPGRAM - FULL FILE (NO CHUNKS!)
-            const response = await deepgram.speak.request(
-                { text: replyText },
-                { 
-                    model: "aura-asteria-en", 
-                    encoding: "linear16", 
-                    container: "wav",  // FULL WAV FILE
-                    sample_rate: 24000,
-                    prosody: { speed: 1.1 } 
-                }
-            );
-
-            // Get COMPLETE audio file (no streaming)
-            const audioBuffer = await response.getAudio();
-            
-            // Send ONE complete WAV file
-            ws.send(audioBuffer);
-
-            // Signal complete
-            ws.send(JSON.stringify({ type: 'audio_done' }));
-
-            // Background memory save
-            axios.post(WP_AJAX_URL, new URLSearchParams({
-                action: 'save_ai_memory',
-                user_msg: userText,
-                ai_msg: replyText
-            })).catch(() => {});
-
-        } catch (error) {
-            console.error('Bridge Error:', error.message);
-            ws.send(JSON.stringify({ type: 'error', message: error.message }));
+      realtimeWs.on('message', async (data) => {
+        const event = JSON.parse(data);
+        if (event.type === 'response.audio.delta') {
+          // Stream TTS audio back via Deepgram for better quality if needed, or direct
+          const tts = await deepgram.speak.start({ model: 'aura-asteria-en' });
+          // Pipe audio to client
+          ws.send(JSON.stringify({ type: 'audio', data: event.delta }));
+        } else if (event.type === 'response.text.delta') {
+          ws.send(JSON.stringify({ type: 'text', delta: event.delta }));
         }
-    });
+      });
+    }
+  });
+
+  ws.on('message', (message) => {
+    const data = Buffer.from(message);
+    dgLive.send(data);
+  });
+
+  ws.on('close', () => {
+    dgLive.finish();
+    console.log('Client disconnected');
+  });
 });
+
+server.listen(process.env.PORT || 3000, () => console.log('Server running on port', server.address().port));
