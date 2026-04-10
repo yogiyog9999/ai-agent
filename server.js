@@ -29,23 +29,22 @@ wss.on('connection', (ws) => {
   const sessionId = ++sessionCount;
   console.log(`[DEBUG] 👤 Session ${sessionId} connected`);
   
-  // 1. Setup Deepgram Live with explicit encoding
+  // INITIALIZE DEEPGRAM WITH THE CORRECT CODEC
   const dgLive = deepgram.listen.live({
     model: 'nova-3-general',
     language: 'en-US',
     smart_format: true,
-    // CRITICAL: Most browser MediaRecorders use opus/webm
+    // THESE MUST MATCH YOUR FRONTEND MediaRecorder
     encoding: 'opus', 
     sample_rate: 48000, 
+    container: 'webm', // This tells Deepgram to look for the WebM header
     interim_results: true,
     endpointing: 1500,
     utterance_end_ms: 2000,
-    vad_turnaround_ms: 200,
   });
 
   let dgReady = false;
 
-  // 2. Listeners must be attached immediately
   dgLive.on('open', () => {
     dgReady = true;
     console.log(`[DEBUG] Deepgram WS opened for session ${sessionId}`);
@@ -53,43 +52,31 @@ wss.on('connection', (ws) => {
 
   dgLive.on('transcript', (data) => {
     const transcript = data.channel?.alternatives?.[0]?.transcript?.trim() || '';
-    const isFinal = data.is_final;
-    const speechFinal = data.speech_final;
-
     if (transcript.length > 0) {
-      console.log(`[T ${sessionId}] "${transcript}" (Final: ${isFinal})`);
-      
+      console.log(`[T ${sessionId}] ${transcript}`);
       ws.send(JSON.stringify({ 
         type: 'text', 
-        delta: transcript,
-        isFinal: isFinal || speechFinal
+        delta: transcript + ' ' 
       }));
     }
   });
 
-  dgLive.on('error', (err) => console.error(`[DG ERROR ${sessionId}]`, err));
-  dgLive.on('close', () => console.log(`[DG CLOSE ${sessionId}] Connection closed`));
-
-  // 3. Handle incoming audio from Client
+  // Handle incoming audio from Frontend
   ws.on('message', (data) => {
-    // Only send to Deepgram if the connection is actually open
+    // We MUST wait for dgReady to be true, 
+    // otherwise the first WebM header chunk is lost and the stream breaks.
     if (dgReady && dgLive.getReadyState() === 1) {
       dgLive.send(data);
     }
   });
 
-  // Heartbeat to keep Railway connection alive
-  const heartbeat = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) ws.ping();
-  }, 30000);
-
   ws.on('close', () => {
+    if (dgLive) dgLive.finish();
     console.log(`[CLOSE] Session ${sessionId} ended`);
-    clearInterval(heartbeat);
-    dgLive.finish();
   });
-});
 
+  dgLive.on('error', (err) => console.error(`[DG ERROR ${sessionId}]`, err));
+});
 process.on('SIGTERM', () => {
   wss.clients.forEach(ws => ws.close());
   process.exit(0);
