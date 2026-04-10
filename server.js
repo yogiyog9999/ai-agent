@@ -10,14 +10,6 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'live', 
-    clients: wss.clients.size, 
-    uptime: process.uptime(),
-    deepgram: !!deepgram 
-  });
-});
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -26,62 +18,61 @@ const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 let sessionCount = 0;
 
 wss.on('connection', (ws) => {
-  const sessionId = ++sessionCount;
-  console.log(`[DEBUG] 👤 Session ${sessionId} connected`);
-  
-  // INITIALIZE DEEPGRAM WITH THE CORRECT CODEC
-  const dgLive = deepgram.listen.live({
-    model: 'nova-3-general',
-    language: 'en-US',
-    smart_format: true,
-    // THESE MUST MATCH YOUR FRONTEND MediaRecorder
-    encoding: 'opus', 
-    sample_rate: 48000, 
-    container: 'webm', // This tells Deepgram to look for the WebM header
-    interim_results: true,
-    endpointing: 1500,
-    utterance_end_ms: 2000,
-  });
+    const sessionId = ++sessionCount;
+    let dgLive;
+    let dgReady = false;
+    let headerBuffer = []; 
 
-  let dgReady = false;
+    console.log(`[DEBUG] 👤 Session ${sessionId} connected`);
 
-  dgLive.on('open', () => {
-    dgReady = true;
-    console.log(`[DEBUG] Deepgram WS opened for session ${sessionId}`);
-  });
+    // 1. Setup Deepgram with settings matching browser MediaRecorder
+    dgLive = deepgram.listen.live({
+        model: 'nova-3-general',
+        language: 'en-US',
+        smart_format: true,
+        encoding: 'opus', 
+        sample_rate: 48000, 
+        container: 'webm', // Critical for browser audio
+        interim_results: true,
+        endpointing: 1500,
+    });
 
-  dgLive.on('transcript', (data) => {
-    const transcript = data.channel?.alternatives?.[0]?.transcript?.trim() || '';
-    if (transcript.length > 0) {
-      console.log(`[T ${sessionId}] ${transcript}`);
-      ws.send(JSON.stringify({ 
-        type: 'text', 
-        delta: transcript + ' ' 
-      }));
-    }
-  });
+    dgLive.on('open', () => {
+        dgReady = true;
+        console.log(`[DEBUG] Deepgram 101 SUCCESS - Session ${sessionId}`);
+        
+        // 2. Flush header buffer once connection is open
+        if (headerBuffer.length > 0) {
+            headerBuffer.forEach(chunk => dgLive.send(chunk));
+            headerBuffer = []; 
+        }
+    });
 
-  // Handle incoming audio from Frontend
-  ws.on('message', (data) => {
-    // We MUST wait for dgReady to be true, 
-    // otherwise the first WebM header chunk is lost and the stream breaks.
-    if (dgReady && dgLive.getReadyState() === 1) {
-      dgLive.send(data);
-    }
-  });
+    dgLive.on('transcript', (data) => {
+        const transcript = data.channel?.alternatives?.[0]?.transcript?.trim();
+        if (transcript) {
+            console.log(`[T ${sessionId}] ${transcript}`);
+            ws.send(JSON.stringify({ type: 'text', delta: transcript }));
+        }
+    });
 
-  ws.on('close', () => {
-    if (dgLive) dgLive.finish();
-    console.log(`[CLOSE] Session ${sessionId} ended`);
-  });
+    // 3. Handle data from browser
+    ws.on('message', (data) => {
+        if (!dgReady) {
+            headerBuffer.push(data); // Don't lose the first few seconds
+        } else if (dgLive.getReadyState() === 1) {
+            dgLive.send(data);
+        }
+    });
 
-  dgLive.on('error', (err) => console.error(`[DG ERROR ${sessionId}]`, err));
-});
-process.on('SIGTERM', () => {
-  wss.clients.forEach(ws => ws.close());
-  process.exit(0);
+    ws.on('close', () => {
+        console.log(`[CLOSE] Session ${sessionId} ended`);
+        if (dgLive) dgLive.finish();
+    });
+
+    dgLive.on('error', (err) => console.error(`[DG ERROR ${sessionId}]`, err));
 });
 
 server.listen(process.env.PORT || 8080, '0.0.0.0', () => {
-  console.log('🚀 Server running on port', process.env.PORT || 8080);
+    console.log('🚀 Server active on port', process.env.PORT || 8080);
 });
