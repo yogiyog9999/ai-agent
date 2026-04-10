@@ -10,66 +10,92 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('/health', (req, res) => res.json({ status: 'live', time: new Date().toISOString() }));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-
-let activeSessions = new Map(); // Track for cleanup
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY || 'demo');
+let sessionCount = 0;
 
 wss.on('connection', (ws) => {
-  const sessionId = Date.now();
-  console.log(`👤 Session ${sessionId} connected`);
+  const sessionId = ++sessionCount;
+  console.log(`[DEBUG] 👤 Session ${sessionId} connected (${wss.clients.size} active)`);
   
   let dgLive;
-  const cleanup = () => {
-    if (dgLive) {
-      dgLive.finish();
-      dgLive = null;
-    }
-    activeSessions.delete(sessionId);
-  };
   
-  activeSessions.set(sessionId, cleanup);
+  // Heartbeat every 30s - Railway killer
+  const heartbeat = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+      console.log(`[HEARTBEAT] Session ${sessionId} alive`);
+    }
+  }, 30000);
+  
+  ws.on('pong', () => console.log(`[PONG] Session ${sessionId}`));
   
   try {
     dgLive = deepgram.listen.live({
       model: 'nova-3-general',
       language: 'en-US',
-      endpointing: 500,
-      interim_results: false
+      endpointing: 700,
+      vad_turnaround_ms: 100,
+      request_id: `railway-${sessionId}`
     });
+    
+    console.log(`[DEBUG] 🔊 Deepgram LIVE for session ${sessionId}`);
+    
+    dgLive.on('open', () => console.log(`[DEBUG] Deepgram WS open session ${sessionId}`));
+    dgLive.on('close', () => console.log(`[DEBUG] Deepgram WS close session ${sessionId}`));
     
     dgLive.on('transcript', (data) => {
       const transcript = data.channel?.alternatives?.[0]?.transcript?.trim();
-      if (transcript && data.is_final) {
-        console.log(`🗣️ "${transcript}"`);
+      const isFinal = data.is_final;
+      console.log(`[TRANSCRIPT ${sessionId}] "${transcript}" final=${isFinal} confidence=${data.channel?.alternatives?.[0]?.confidence || 'N/A'}`);
+      
+      if (transcript && isFinal && transcript.length > 2) {
         ws.send(JSON.stringify({ 
           type: 'text', 
-          delta: `Heard: "${transcript}". Digital PR Agency match from wp_ai_vectors!` 
+          delta: `🎯 Heard "${transcript}" - WP marketing match! (conf: ${data.channel.alternatives[0].confidence.toFixed(2)})` 
         }));
       }
     });
     
-  } catch (e) {
-    console.error('Deepgram error:', e.message);
+    dgLive.on('error', (err) => {
+      console.error(`[DEEPGRAM ERROR ${sessionId}]`, err);
+    });
+    
+  } catch (err) {
+    console.error(`[DEEPGRAM INIT ERROR ${sessionId}]`, err.message);
   }
   
+  let chunkCount = 0;
   ws.on('message', (data) => {
-    if (dgLive && data.length > 100) dgLive.send(data);
+    chunkCount++;
+    const size = data.length;
+    console.log(`[AUDIO ${sessionId}] Chunk #${chunkCount} size=${size}B`);
+    
+    if (dgLive && size > 50) {
+      dgLive.send(data);
+    }
   });
   
-  ws.on('close', cleanup);
+  ws.on('close', () => {
+    clearInterval(heartbeat);
+    if (dgLive) dgLive.finish();
+    console.log(`[CLOSE] Session ${sessionId} ended (chunks: ${chunkCount})`);
+  });
+  
+  ws.on('error', (err) => console.error(`[WS ERROR ${sessionId}]`, err));
 });
 
-// Graceful shutdown
+// Railway health + graceful SIGTERM
 process.on('SIGTERM', () => {
-  console.log('🛑 Graceful shutdown');
-  activeSessions.forEach(cleanup => cleanup());
+  console.log('🛑 SIGTERM received - cleaning up');
+  wss.clients.forEach(ws => ws.close());
   process.exit(0);
 });
 
 server.listen(process.env.PORT || 8080, '0.0.0.0', () => {
-  console.log('🚀 STABLE VOICE AGENT - No crashes!');
+  console.log('🚀 DEBUG AGENT LIVE - Check /health');
 });
