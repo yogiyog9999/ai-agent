@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -44,9 +43,12 @@ wss.on('connection', async (ws) => {
     const transcript = data.channel.alternatives[0].transcript.trim();
     if (data.is_final && transcript) {
       // Fast WP table query
-      const [rows] = await db.execute(`SELECT * FROM ${WP_TABLE} WHERE MATCH(content) AGAINST (?) OR name LIKE ?`, [transcript, `%${transcript}%`]);
-      const context = rows.map(row => `${row.name}: ${row.content}`).join('; ') || 'No matching data.';
-
+     const [rows] = await db.execute(
+  `SELECT content FROM wp_ai_vectors 
+   WHERE MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE) 
+   LIMIT 5`, [transcript]
+);
+const context = rows.map(row => row.content).slice(0,3).join('\n\n'); // Top 3 for speed
       // Send to OpenAI Realtime (server-side session)
       const realtimeWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
         headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }
