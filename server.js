@@ -17,10 +17,9 @@ wss.on('connection', (ws) => {
     const sessionId = ++sessionCount;
     let dgLive;
     let dgReady = false;
-    let chunksReceived = 0;
-    let totalBytes = 0;
+    let headerBuffer = []; 
 
-    console.log(`\n[SESSION ${sessionId}] 👤 New client connected`);
+    console.log(`[SESSION ${sessionId}] Connected`);
 
     dgLive = deepgram.listen.live({
         model: 'nova-3-general',
@@ -30,54 +29,46 @@ wss.on('connection', (ws) => {
         sample_rate: 48000, 
         container: 'webm',
         interim_results: true,
-        utterance_end_ms: 1000,
-        endpointing: 500,
+        endpointing: 500, // Detects when you stop talking
     });
 
     dgLive.on('open', () => {
         dgReady = true;
-        console.log(`[SESSION ${sessionId}] ✅ Deepgram 101 SUCCESS (Handshake complete)`);
+        // Flush header buffer to ensure Deepgram understands the codec
+        headerBuffer.forEach(chunk => dgLive.send(chunk));
+        headerBuffer = [];
+        console.log(`[SESSION ${sessionId}] Deepgram Ready`);
     });
 
     dgLive.on('transcript', (data) => {
         const transcript = data.channel?.alternatives?.[0]?.transcript?.trim();
+        
         if (transcript) {
-            console.log(`[SESSION ${sessionId}] 📝 TRANSCRIPT: "${transcript}"`);
-            ws.send(JSON.stringify({ type: 'text', delta: transcript }));
-        } else {
-            // Log empty transcripts to see if Deepgram is at least "listening"
-            console.log(`[SESSION ${sessionId}] 👂 Deepgram processed a chunk but found no words.`);
+            console.log(`[SESSION ${sessionId}] User: ${transcript}`);
+            
+            // Send the transcript to the frontend
+            ws.send(JSON.stringify({ 
+                type: 'text', 
+                delta: transcript,
+                isFinal: data.is_final // Tell frontend if the sentence is done
+            }));
         }
     });
 
-    dgLive.on('metadata', (data) => console.log(`[SESSION ${sessionId}] ℹ️ Metadata:`, JSON.stringify(data)));
-    
     ws.on('message', (data) => {
-        chunksReceived++;
-        totalBytes += data.length;
-
-        // Log every 10th chunk to avoid flooding Railway logs, but prove data is moving
-        if (chunksReceived % 10 === 0) {
-            console.log(`[SESSION ${sessionId}] 📦 Audio Flow: Received ${chunksReceived} chunks (${totalBytes} total bytes)`);
-        }
-
-        if (dgReady && dgLive.getReadyState() === 1) {
+        if (!dgReady) {
+            headerBuffer.push(data);
+        } else if (dgLive.getReadyState() === 1) {
             dgLive.send(data);
         }
     });
 
-    dgLive.on('error', (err) => {
-        console.error(`[SESSION ${sessionId}] ❌ DEEPGRAM ERROR:`, err);
-        ws.send(JSON.stringify({ type: 'error', message: 'Deepgram connection error' }));
-    });
-
     ws.on('close', () => {
-        console.log(`[SESSION ${sessionId}] 🚪 Client disconnected. Total Chunks: ${chunksReceived}`);
         if (dgLive) dgLive.finish();
+        console.log(`[SESSION ${sessionId}] Closed`);
     });
 });
 
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 DEBUG SERVER LIVE ON PORT ${PORT}`);
+server.listen(process.env.PORT || 8080, '0.0.0.0', () => {
+    console.log('🚀 Server running on port', process.env.PORT || 8080);
 });
