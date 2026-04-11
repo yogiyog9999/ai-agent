@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 from dotenv import load_dotenv
-from livekit.agents import JobContext, WorkerOptions, cli, voice_assistant
+from livekit.agents import JobContext, WorkerOptions, cli
+from livekit.agents.voice_assistant import VoiceAssistant # Import updated here
 from livekit.plugins import openai, deepgram, silero
 
 load_dotenv()
