@@ -1,98 +1,62 @@
 import asyncio
 import logging
-import os
 from dotenv import load_dotenv
-from livekit.agents import JobContext, WorkerOptions, cli
-from livekit.agents.voice_assistant import VoiceAssistant # Import updated here
+from livekit.agents import JobContext, WorkerOptions, cli, llm
+from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import openai, deepgram, silero
 
 load_dotenv()
 logger = logging.getLogger("voice-agent")
 
-# --- MEMORY STORE (simple session memory) ---
-SESSION_MEMORY = {}
+# --- DEMO CONFIGURATION ---
+# Change this data depending on which client you are pitching to!
+CLIENT_DATA = {
+    "name": "Veronica",
+    "company": "Dlist Software",
+    "knowledge": """
+    - We build custom WordPress plugins and Ionic mobile apps.
+    - Our pricing starts at $500 for small projects.
+    - We are open Monday to Friday, 9 AM to 6 PM.
+    - We offer a free 15-minute consultation.
+    """
+}
 
 async def entrypoint(ctx: JobContext):
-    session_id = ctx.room.name
-
-    # --- KNOWLEDGE BASE ---
-    website_knowledge = """
-    Welcome to Dlist! We are a software agency.
-    Services: WordPress plugins, Ionic mobile apps.
-    Pricing: Starts at $500.
-    Hours: 9 AM to 6 PM IST.
-    """
-
-    # --- MEMORY ---
-    history = SESSION_MEMORY.get(session_id, [])
-
-    # --- SYSTEM PROMPT (HUMAN-LIKE) ---
-    system_prompt = (
-        "You are Veronica, a real human customer support agent on a phone call.\n"
-        "Speak naturally, like a human — not like an AI.\n"
-        "Use short sentences.\n"
-        "Sometimes use fillers like 'uh', 'hmm', 'let me check'.\n"
-        "Be polite, warm, and slightly conversational.\n"
-        "Interrupt yourself naturally if needed.\n"
-        "Never speak in paragraphs.\n"
-        "Act like you're on a real call center line.\n\n"
-        f"Website info:\n{website_knowledge}"
-    )
-
-    chat_ctx = openai.ChatContext().append(
+    # 1. Setup the Chat Context (The "Brain")
+    initial_ctx = llm.ChatContext().append(
         role="system",
-        text=system_prompt
+        text=(
+            f"You are {CLIENT_DATA['name']}, a friendly human assistant for {CLIENT_DATA['company']}.\n"
+            "Keep answers brief (1-2 sentences). Use human fillers like 'uh' or 'hmm' occasionally.\n"
+            f"Use this info to help: {CLIENT_DATA['knowledge']}\n"
+            "If you don't know an answer, say you'll have a human team member call them back."
+        ),
     )
 
-    # Inject previous memory
-    for msg in history[-6:]:
-        chat_ctx.append(**msg)
-
+    # 2. Connect to the LiveKit Room
     await ctx.connect()
+    logger.info(f"Connected to room: {ctx.room.name}")
 
-    assistant = voice_assistant.VoiceAssistant(
+    # 3. Initialize the Voice Assistant
+    assistant = VoiceAssistant(
         vad=silero.VAD.load(),
-
-        # ⚡ FAST + ACCURATE STT
-        stt=deepgram.STT(
-            model="nova-2",
-            language="en-IN",
-            interim_results=True
-        ),
-
-        # 🧠 FAST LLM
-        llm=openai.LLM(
-            model="gpt-4o-mini",
-            temperature=0.6,
-            max_tokens=120
-        ),
-
-        # 🎙️ REAL HUMAN VOICE (FAST)
-        tts=deepgram.TTS(
-            model="aura-2-thalia-en",
-        ),
-
-        chat_ctx=chat_ctx,
-
-        # 🔥 REAL-TIME BEHAVIOR SETTINGS
-        interrupt_speech_duration=0.3,
-        min_endpointing_delay=0.2,
-        preemptive_response=True,
+        stt=deepgram.STT(model="nova-2", language="en-IN"),
+        llm=openai.LLM(model="gpt-4o-mini"),
+        tts=deepgram.TTS(model="aura-2-thalia-en"), # High-quality natural voice
+        chat_ctx=initial_ctx,
+        allow_interruptions=True,
+        interrupt_speech_duration=0.5,
+        preemptive_response=True
     )
 
+    # 4. Start the session
     assistant.start(ctx.room)
 
-    # --- GREETING ---
+    # 5. Professional Greeting
     await assistant.say(
-        "Hey! Thanks for calling Dlist. Uh, how can I help you today?",
+        f"Hi! Thanks for calling {CLIENT_DATA['company']}. I'm {CLIENT_DATA['name']}. How can I help you today?",
         allow_interruptions=True
     )
-
-    # --- SAVE MEMORY LOOP ---
-    async for msg in assistant.chat_stream():
-        history.append(msg)
-        SESSION_MEMORY[session_id] = history[-10:]  # keep last 10
-
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
